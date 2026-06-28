@@ -1,0 +1,2527 @@
+---
+title: "ST606 Final Project — Bank Term Deposit Subscription Analysis"
+author: "Abhimanyu Muraleeharan Sreekala (25254325)"
+date: "2026-03-12"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+---
+
+# Introduction
+
+This project analyses the Bank Marketing dataset to determine which client and
+campaign features are associated with subscription to a term deposit. A secondary
+research question investigates whether call duration is significantly associated
+with the probability of subscription. Binary logistic regression is the primary
+modelling technique employed.
+
+---
+
+# Data Loading & Setup
+
+## Load Libraries
+
+```{r}
+#install.packages("pROC")
+#install.packages("caret")
+#install.packages("car")
+#install.packages("arm")
+#install.packages("ResourceSelection")
+##install.packages("vivid")
+#install.packages("ranger")
+#install.packages("glmnet")
+#install.packages("rlang")
+#install.packages("factoextra")
+#install.packages("reshape2")
+#install.packages("smotefamily")
+#install.packages(c("patchwork", "cowplot"))
+```
+
+
+```{r libraries}
+library(tidyverse)
+library(ggplot2)
+library(reshape2)
+library(MASS)
+library(pROC)
+library(caret)
+library(car)
+library(arm)
+library(ResourceSelection)
+library(vivid)
+library(ranger)
+library(dplyr)
+library(patchwork)
+library(cowplot)
+```
+
+## Load Data
+
+```{r load-data}
+bank <- read.csv("/Users/abhi/Rstudio/ST606_Final_Project/bank-full.csv", sep = ";")
+```
+
+---
+
+# Exploratory Data Analysis
+
+## Initial Inspection
+
+```{r inspect-structure}
+str(bank)
+```
+
+```{r inspect-dims}
+dim(bank)
+```
+
+```{r inspect-names}
+names(bank)
+```
+
+```{r inspect-head}
+head(bank)
+```
+
+```{r inspect-tail}
+tail(bank)
+```
+
+```{r inspect-summary}
+summary(bank)
+```
+
+```{r missing-values}
+colSums(is.na(bank))
+```
+
+> There are **no missing values** in this dataset — all columns return 0.
+
+## Outcome Variable Distribution
+
+```{r outcome-table}
+table(bank$y)
+prop.table(table(bank$y))
+```
+
+```{r outcome-plot}
+ggplot(bank, aes(x = y, fill = y)) +
+  geom_bar() +
+  geom_text(stat = "count",
+            aes(label = paste0(round(after_stat(count) / nrow(bank) * 100, 1), "%")),
+            vjust = -0.5, size = 4) +
+  scale_fill_manual(values = c("steelblue", "tomato")) +
+  labs(title = "Distribution of Term Deposit Subscription",
+       x = "Subscribed", y = "Count") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+> The outcome variable `y` is **heavily imbalanced**: approximately 88.3% of clients
+> did not subscribe (`no`) and only 11.7% subscribed (`yes`). This class imbalance
+> must be addressed during modelling.
+
+## Data Type Conversion
+
+```{r convert-factors}
+bank <- bank %>%
+  mutate(across(where(is.character), as.factor))
+
+sapply(bank, class)
+sapply(bank, nlevels)
+```
+
+## Variable Descriptions
+
+```{r variable-description}
+variable_description <- data.frame(
+  Variable = names(bank),
+  Type = sapply(bank, class),
+  Description = c(
+    "Age of client",
+    "Type of job",
+    "Marital status",
+    "Education level",
+    "Credit in default",
+    "Average yearly balance (EUR)",
+    "Housing loan",
+    "Personal loan",
+    "Contact communication type",
+    "Last contact day",
+    "Last contact month",
+    "Call duration in seconds",
+    "Number of campaign contacts",
+    "Days since previous contact",
+    "Number of previous contacts",
+    "Previous campaign outcome",
+    "Subscribed term deposit (outcome)"
+  )
+)
+
+variable_description
+```
+
+---
+
+# Descriptive Statistics
+
+## Numeric Variables
+
+```{r numeric-summary}
+numeric_vars <- bank[sapply(bank, is.numeric)]
+
+descriptive_table <- data.frame(
+  Mean   = sapply(numeric_vars, mean),
+  SD     = sapply(numeric_vars, sd),
+  Min    = sapply(numeric_vars, min),
+  Median = sapply(numeric_vars, median),
+  Max    = sapply(numeric_vars, max)
+)
+
+round(descriptive_table, 2)
+```
+
+## Categorical Variables — Frequency Tables
+
+```{r freq-tables}
+round(prop.table(table(bank$job))      * 100, 2)
+round(prop.table(table(bank$education))* 100, 2)
+round(prop.table(table(bank$contact))  * 100, 2)
+round(prop.table(table(bank$poutcome)) * 100, 2)
+round(prop.table(table(bank$y))        * 100, 2)
+```
+
+> - **Job:** The most common occupations are blue-collar, management, technician, and admin. The least common are unknown, student, housemaid, and entrepreneur.
+> - **Education:** Secondary education is most prevalent, followed by tertiary and then primary".
+> - **Contact:** Cellular contact is most common, accounting for the majority of contacts.
+> - **Previous outcome (`poutcome`):** The majority are "unknown", followed by "failure" as the most prominent known outcome.
+> - **Subscription (`y`):** "No" is the dominant outcome (~88%), reflecting a significant class imbalance.
+
+---
+
+# Univariate Visualisation
+
+## Histograms — Continuous Variables
+
+```{r hist-age}
+hist(bank$age,
+     main = "Histogram of Age",
+     xlab = "Age",
+     breaks = 20)
+```
+
+> Roughly right-skewed with a slight bell shape; highest frequency between ages 30–35.
+
+```{r hist-balance}
+hist(bank$balance,
+     main = "Histogram of Balance",
+     xlab = "Balance (EUR)",
+     breaks = 30)
+```
+
+> Strongly right-skewed, with most clients holding lower balances and a long upper tail of high-balance outliers.
+
+```{r hist-duration}
+hist(bank$duration,
+     main = "Histogram of Call Duration",
+     xlab = "Duration (seconds)",
+     breaks = 30)
+```
+
+> Strongly right-skewed — most calls are short, but a few very long calls pull the tail upward.
+
+```{r hist-campaign}
+hist(bank$campaign,
+     main = "Histogram of Campaign Contacts",
+     xlab = "Number of Contacts",
+     breaks = 20)
+```
+
+> Heavily right-skewed; most clients were contacted only 1–3 times during the campaign.
+
+```{r hist-previous}
+hist(bank$previous,
+     main = "Histogram of Previous Contacts",
+     xlab = "Previous",
+     breaks = 20)
+```
+
+> Very strongly right-skewed — the vast majority of clients had zero previous contacts before this campaign.
+
+## Boxplots — Continuous Variables
+
+```{r box-age}
+boxplot(bank$age,
+        main = "Boxplot of Age",
+        ylab = "Age")
+```
+
+> The median age is approximately 39. Many outliers appear above the upper whisker (ages up to ~95), confirming a positively skewed distribution.
+
+```{r box-balance}
+boxplot(bank$balance,
+        main = "Boxplot of Balance",
+        ylab = "Balance (EUR)")
+```
+
+> Median is near the lower portion of the box, with numerous high-value outliers reaching ~100,000 EUR. Highly positively skewed with a few negative-balance clients as well.
+
+```{r box-duration}
+boxplot(bank$duration,
+        main = "Boxplot of Call Duration",
+        ylab = "Duration (seconds)")
+```
+
+> Many upper outliers including extreme values approaching 5,000 seconds. Strongly positively skewed with no notable lower outliers.
+
+```{r box-campaign}
+boxplot(bank$campaign,
+        main = "Boxplot of Campaign Contacts",
+        ylab = "Number of Contacts")
+```
+
+> The median is approximately 2, with many upper outliers up to ~63 contacts. Positively skewed distribution.
+
+```{r box-previous}
+boxplot(bank$previous,
+        main = "Boxplot of Previous Contacts",
+        ylab = "Previous")
+```
+
+> The median is very close to 0. There are numerous upper outliers, including one extreme value around 275. Highly positively skewed.
+
+---
+
+# Bivariate Analysis
+
+## Correlation Matrix — Numeric Variables
+
+```{r correlation-matrix}
+cor_matrix <- cor(numeric_vars)
+round(cor_matrix, 2)
+```
+
+```{r correlation-heatmap}
+cor_melt <- melt(cor_matrix)
+
+ggplot(cor_melt, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "steelblue", mid = "white", high = "tomato",
+                       midpoint = 0, limits = c(-1, 1)) +
+  geom_text(aes(label = round(value, 2)), size = 3) +
+  labs(title = "Correlation Heatmap — Numeric Variables",
+       x = "", y = "", fill = "Correlation") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+> The strongest positive correlation is between `pdays` and `previous` (r = 0.45), indicating a moderate positive relationship — clients contacted more previously also tend to have higher pdays values. Most other correlations are close to zero, suggesting weak or negligible linear relationships among the remaining numeric predictors.
+
+## Scatter Plots — Key Relationships
+
+```{r scatter-pdays-previous}
+plot(bank$pdays, bank$previous,
+     main = "Scatter Plot: pdays vs previous",
+     xlab = "pdays", ylab = "previous")
+```
+
+> A slight upward trend is consistent with the moderate positive correlation (r = 0.45). Most points cluster at low previous values, with wide spread in pdays. A few strong outliers are present.
+
+```{r scatter-age-balance}
+plot(bank$age, bank$balance,
+     main = "Scatter Plot: age vs balance",
+     xlab = "Age", ylab = "Balance")
+```
+
+> Widely dispersed with no clear trend, matching the very weak positive correlation (r = 0.10). Most points cluster at lower balances across all ages, with several high-balance outliers.
+
+```{r scatter-duration-campaign}
+plot(bank$duration, bank$campaign,
+     main = "Scatter Plot: duration vs campaign",
+     xlab = "Duration (seconds)", ylab = "Campaign")
+```
+
+> A slight downward trend, consistent with the weak negative correlation (r = -0.08). Points are heavily clustered at lower duration values.
+
+## Categorical Variables vs Subscription (`y`)
+
+```{r cat-vs-y}
+prop.table(table(bank$job,       bank$y), margin = 1)
+prop.table(table(bank$education, bank$y), margin = 1)
+prop.table(table(bank$contact,   bank$y), margin = 1)
+prop.table(table(bank$poutcome,  bank$y), margin = 1)
+prop.table(table(bank$marital,   bank$y), margin = 1)
+```
+
+> - **Job:** Students (28.7%) and retired clients (22.8%) have the highest subscription rates; blue-collar workers (7.3%) have the lowest.
+> - **Education:** Subscription rates increase with education level; tertiary-educated clients subscribe most (15.0%) and primary-educated least (8.6%).
+> - **Contact:** Cellular contact yields the highest subscription rate (14.9%); unknown contact type yields the lowest (4.1%).
+> - **Previous outcome:** Previous success dramatically increases subscription likelihood (64.7%), making `poutcome` one of the strongest predictors.
+> - **Marital status:** Single clients subscribe most (15.0%), married clients least (10.1%); differences are moderate.
+
+```{r subscription-rate-plots}
+plot_sub_rate <- function(var, label) {
+  bank %>%
+    group_by(.data[[var]]) %>%
+    summarise(sub_rate = mean(y == "yes") * 100, .groups = "drop") %>%
+    ggplot(aes(x = reorder(.data[[var]], sub_rate), y = sub_rate)) +
+    geom_col(fill = "steelblue") +
+    geom_text(aes(label = paste0(round(sub_rate, 1), "%")),
+              hjust = -0.1, size = 3.5) +
+    coord_flip() +
+    ylim(0, 70) +
+    labs(title = paste("Subscription Rate by", label),
+         x = label, y = "Subscription Rate (%)") +
+    theme_minimal()
+}
+
+plot_sub_rate("job",       "Job Type")
+plot_sub_rate("education", "Education Level")
+plot_sub_rate("poutcome",  "Previous Campaign Outcome")
+plot_sub_rate("marital",   "Marital Status")
+plot_sub_rate("contact",   "Contact Type")
+```
+
+## Numeric Variables vs Subscription (`y`)
+
+```{r num-vs-y}
+ggplot(bank, aes(x = y, y = duration, fill = y)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  scale_fill_manual(values = c("steelblue", "tomato")) +
+  labs(title = "Call Duration by Subscription Outcome",
+       x = "Subscribed", y = "Duration (seconds)") +
+  theme_minimal() + theme(legend.position = "none")
+
+ggplot(bank, aes(x = y, y = balance, fill = y)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  scale_fill_manual(values = c("steelblue", "tomato")) +
+  labs(title = "Account Balance by Subscription Outcome",
+       x = "Subscribed", y = "Balance (EUR)") +
+  theme_minimal() + theme(legend.position = "none")
+
+ggplot(bank, aes(x = y, y = age, fill = y)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  scale_fill_manual(values = c("steelblue", "tomato")) +
+  labs(title = "Age by Subscription Outcome",
+       x = "Subscribed", y = "Age") +
+  theme_minimal() + theme(legend.position = "none")
+```
+
+> `duration` shows the clearest separation between outcomes — the "yes" group has a substantially higher median call duration, strongly suggesting it is a key predictor. `balance` and `age` show much smaller differences and heavy overlap between groups.
+
+---
+
+# Data Preparation for Modelling
+
+## Train / Test Split
+
+```{r train-test-split}
+set.seed(123)
+
+train_index <- sample(
+  1:nrow(bank),
+  size = 0.6 * nrow(bank)
+)
+
+train_data <- bank[train_index, ]
+
+remaining <- bank[-train_index, ]
+
+valid_index <- sample(
+  1:nrow(remaining),
+  size = 0.5 * nrow(remaining)
+)
+
+valid_data <- remaining[valid_index, ]
+test_data  <- remaining[-valid_index, ]
+
+dim(valid_data)
+dim(test_data)
+dim(train_data)
+```
+
+## Class Balance Verification: Training vs Test Data
+
+Before modelling, it is important to confirm that the 70/30 random split preserved
+the original class proportions in both subsets.
+
+```{r class-balance}
+cat("=== Full Dataset ===\n")
+round(prop.table(table(bank$y)) * 100, 2)
+
+cat("\n=== Training Data (60%) ===\n")
+round(prop.table(table(train_data$y)) * 100, 2)
+
+cat("\n=== Validating Data (20%) ===\n")
+round(prop.table(table(valid_data$y)) * 100, 2)
+
+cat("\n=== Test Data (20%) ===\n")
+round(prop.table(table(test_data$y)) * 100, 2)
+```
+```{r}
+balance_df <- data.frame(
+  Split = rep(c("Full Dataset", "Training (60%)", "Validation (20%)", "Test (20%)"), each = 2),
+  Outcome = rep(c("no", "yes"), times = 4),
+  Pct = c(
+    round(prop.table(table(bank$y))       * 100, 1)[c("no","yes")],
+    round(prop.table(table(train_data$y)) * 100, 1)[c("no","yes")],
+    round(prop.table(table(valid_data$y)) * 100, 1)[c("no","yes")],
+    round(prop.table(table(test_data$y))  * 100, 1)[c("no","yes")]
+  )
+)
+```
+
+```{r class-balance-plot}
+ggplot(balance_df, aes(x = Split, y = Pct, fill = Outcome)) +
+  geom_col(position = "dodge") +
+  geom_text(aes(label = paste0(Pct, "%")),
+            position = position_dodge(width = 0.9),
+            vjust = -0.4,
+            size = 4.5) +
+  scale_fill_manual(values = c("steelblue", "tomato")) +
+  labs(
+    title = "Class Distribution Across Full Dataset, Training, Validation & Test Sets",
+    x = NULL,
+    y = "Percentage (%)"
+  ) +
+  theme_minimal() +
+  ylim(0, 100) +
+  theme(
+    plot.title   = element_text(size = 14, face = "bold"),
+    axis.text.x  = element_text(size = 13),
+    axis.text.y  = element_text(size = 13),
+    axis.title.y = element_text(size = 14, face = "bold"),
+    legend.title = element_text(size = 14),
+    legend.text  = element_text(size = 13)
+  )
+```
+
+> The proportions of "yes" (~11.7%) and "no" (~88.3%) are consistent across all three
+> splits. This confirms that the random split did not introduce any accidental bias in
+> class representation — both the training and test sets are representative samples of
+> the original dataset. This is important because the model is trained and evaluated
+> under the same class imbalance conditions.
+
+---
+
+# Modelling
+
+## Simple Logistic Regression — Duration Only
+
+This model addresses the primary research question: is call duration significantly
+associated with the probability of subscription?
+
+```{r simple-model}
+model_duration <- glm(y ~ duration,
+                      data   = train_data,
+                      family = binomial)
+
+summary(model_duration)
+```
+
+```{r simple-model-equation}
+coef_simple <- coef(model_duration)
+
+cat("=== Simple Model Equation ===\n")
+cat("log( p / (1-p) ) =", round(coef_simple[1], 4),
+    "+", round(coef_simple[2], 6), "* duration\n\n")
+cat("Where p = probability of subscribing to a term deposit\n")
+cat("- Intercept:", round(coef_simple[1], 4), "= log-odds when duration = 0\n")
+cat("- duration: each additional second increases log-odds by",
+    round(coef_simple[2], 6), "\n")
+```
+
+```{r simple-model-or}
+or_simple <- exp(cbind(OR = coef(model_duration), confint(model_duration)))
+cat("=== Odds Ratios and 95% CI — Simple Model ===\n")
+round(or_simple, 4)
+```
+
+```{r simple-model-effect}
+cat("Effect of 1 extra minute of call duration:\n")
+cat("OR =", round(exp(60 * coef_simple[2]), 4),
+    "— odds increase by",
+    round((exp(60 * coef_simple[2]) - 1) * 100, 1), "%\n")
+
+cat("Effect of 5 extra minutes of call duration:\n")
+cat("OR =", round(exp(300 * coef_simple[2]), 4),
+    "— odds increase by",
+    round((exp(300 * coef_simple[2]) - 1) * 100, 1), "%\n")
+```
+
+> The coefficient for `duration` is positive and highly significant (p < 2×10⁻¹⁶).
+> Each additional second of call duration increases the odds of subscription by
+> approximately **0.36%**. An extra minute of call duration increases the odds by
+> approximately **23.7%** in the simple model. This confirms that call duration is
+> significantly associated with term deposit subscription.
+
+```{r simple-model-curve}
+duration_seq <- data.frame(duration = seq(0, 1500, by = 10))
+duration_seq$prob <- predict(model_duration, newdata = duration_seq, type = "response")
+
+ggplot(duration_seq, aes(x = duration, y = prob)) +
+  geom_line(color = "steelblue", linewidth = 1.2) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "tomato") +
+  labs(title = "Predicted Probability of Subscription vs Call Duration",
+       x = "Call Duration (seconds)",
+       y = "Predicted Probability of Subscribing") +
+  theme_minimal()
+```
+
+```{r simple-model-accuracy}
+pred_simple_prob  <- predict(model_duration, newdata = test_data, type = "response")
+pred_simple_class <- factor(ifelse(pred_simple_prob >= 0.5, "yes", "no"),
+                            levels = c("no", "yes"))
+test_data$y       <- factor(test_data$y, levels = c("no", "yes"))
+
+acc_simple <- mean(pred_simple_class == test_data$y)
+cat("Simple model accuracy:", round(acc_simple * 100, 2), "%\n")
+```
+
+---
+
+## Multiple Logistic Regression — All Key Predictors
+
+```{r multi-model}
+model_multi <- glm(y ~ duration + age + balance + campaign + previous +
+                     job + marital + education + contact + poutcome,
+                   data   = train_data,
+                   family = binomial)
+
+summary(model_multi)
+```
+
+```{r multi-model-or}
+or_multi    <- exp(cbind(OR = coef(model_multi), confint(model_multi)))
+or_multi_df <- as.data.frame(round(or_multi, 4))
+or_multi_df$Predictor  <- rownames(or_multi_df)
+or_multi_df            <- or_multi_df[, c("Predictor", "OR", "2.5 %", "97.5 %")]
+colnames(or_multi_df)  <- c("Predictor", "OR", "CI_lower", "CI_upper")
+or_multi_df$Significant <- ifelse(or_multi_df$CI_lower > 1 |
+                                    or_multi_df$CI_upper < 1, "Yes", "No")
+print(or_multi_df)
+```
+```{r}
+multi_or <- exp(cbind(
+  OR = coef(model_multi),
+  confint(model_multi)
+))
+
+multi_table <- data.frame(
+  Predictor = rownames(multi_or),
+  OR        = round(multi_or[,1], 3),
+  CI        = paste0(
+                "(",
+                round(multi_or[,2], 3),
+                ", ",
+                round(multi_or[,3], 3),
+                ")"
+              ),
+  p_value   = round(summary(model_multi)$coefficients[,4], 4)
+)
+
+multi_table <- multi_table[-1, ]   # remove intercept
+
+print(multi_table)
+```
+```{r}
+coef_duration <- coef(model_multi)["duration"]
+
+ci_duration <- confint(model_multi)["duration", ]
+
+OR_1min <- exp(60 * coef_duration)
+
+CI_1min <- exp(60 * ci_duration)
+
+OR_1min
+CI_1min
+```
+
+```{r multi-model-comparison}
+cat("=== Model Comparison: Simple vs Multiple ===\n")
+cat("Simple model  AIC:", round(AIC(model_duration), 2), "\n")
+cat("Multiple model AIC:", round(AIC(model_multi), 2), "\n\n")
+
+anova(model_duration, model_multi, test = "Chisq")
+
+mcfadden_simple <- 1 - (model_duration$deviance / model_duration$null.deviance)
+mcfadden_multi  <- 1 - (model_multi$deviance    / model_multi$null.deviance)
+
+cat("McFadden R² — Simple model: ",  round(mcfadden_simple, 4), "\n")
+cat("McFadden R² — Multiple model:", round(mcfadden_multi,  4), "\n")
+```
+
+> Adding predictors substantially improves model fit. The multiple model achieves a
+> lower AIC and a higher McFadden R² (0.2925 vs 0.1588), and the likelihood ratio test
+> confirms the improvement is statistically significant.
+
+```{r multi-model-or-plot}
+or_plot_df <- or_multi_df[-1, ]  # remove intercept
+
+ggplot(or_plot_df, aes(x = reorder(Predictor, OR),
+                        y = OR, color = Significant)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper), width = 0.3) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "grey40") +
+  coord_flip() +
+  scale_color_manual(values = c("Yes" = "steelblue", "No" = "tomato")) +
+  labs(title = "Odds Ratios with 95% CI — Multiple Model",
+       x = "Predictor", y = "Odds Ratio", color = "Significant") +
+  theme_minimal()
+```
+
+---
+
+## Variable Selection — Stepwise AIC
+
+```{r stepwise}
+model_step <- stepAIC(model_multi, direction = "both", trace = FALSE)
+summary(model_step)
+```
+
+```{r stepwise-comparison}
+cat("=== Variables in Multiple Model ===\n")
+print(names(coef(model_multi)))
+
+cat("\n=== Variables Retained After Stepwise ===\n")
+print(names(coef(model_step)))
+
+cat("\n=== Variables Removed by Stepwise ===\n")
+removed <- setdiff(names(coef(model_multi)), names(coef(model_step)))
+print(removed)
+
+cat("\nAIC after stepwise:", round(AIC(model_step), 2), "\n")
+```
+
+
+
+```{r significance-check}
+coef_table    <- summary(model_multi)$coefficients
+coef_df       <- as.data.frame(coef_table)
+coef_df$Predictor <- rownames(coef_df)
+colnames(coef_df) <- c("Estimate", "SE", "z_value", "p_value", "Predictor")
+coef_df           <- coef_df[order(coef_df$p_value), ]
+coef_df$Significant <- ifelse(coef_df$p_value < 0.05, "Yes", "No")
+
+cat("=== Non-significant predictors (p > 0.05) ===\n")
+print(data.frame(
+  Predictor = coef_df$Predictor[coef_df$Significant == "No"],
+  p_value   = round(coef_df$p_value[coef_df$Significant == "No"], 6)
+))
+```
+
+```{r anova-deviance}
+anova(model_multi, test = "Chisq")
+```
+
+---
+
+## Final Model — Equation, Coefficients & Odds Ratios
+
+```{r final-model}
+model_final <- model_step
+
+cat("=== Final Model Summary ===\n")
+summary(model_final)
+
+mcfadden_final <- 1 - (model_final$deviance / model_final$null.deviance)
+cat("\nFinal Model AIC:", round(AIC(model_final), 2), "\n")
+cat("McFadden R²:    ", round(mcfadden_final, 4), "\n")
+```
+
+```{r final-model-equation}
+cat("=== FINAL MODEL EQUATION ===\n\n")
+
+coef_final <- coef(model_final)
+
+cat("log( p / (1-p) ) = ",
+    round(coef_final[1], 4), "\n", sep = "")
+
+for(i in 2:length(coef_final)) {
+
+  coef_value <- round(coef_final[i], 6)
+  coef_name  <- names(coef_final)[i]
+
+  if(coef_value >= 0){
+    cat(" + ", coef_value, " * ", coef_name, "\n", sep = "")
+  } else {
+    cat(" - ", abs(coef_value), " * ", coef_name, "\n", sep = "")
+  }
+}
+
+cat("\nWhere p = probability of subscribing to a term deposit\n")
+```
+
+```{r final-model-or-table}
+or_final <- exp(cbind(OR = coef(model_final), confint(model_final)))
+
+or_table <- data.frame(
+  Predictor = rownames(or_final),
+  OR        = round(or_final[, "OR"],     3),
+  CI_lower  = round(or_final[, "2.5 %"],  3),
+  CI_upper  = round(or_final[, "97.5 %"], 3),
+  p_value   = round(summary(model_final)$coefficients[, 4], 4),
+  row.names = NULL
+)
+
+or_table$Sig <- ifelse(or_table$p_value < 0.001, "***",
+                ifelse(or_table$p_value < 0.01,  "**",
+                ifelse(or_table$p_value < 0.05,  "*",
+                ifelse(or_table$p_value < 0.10,  ".", ""))))
+
+or_table <- or_table[-1, ]
+rownames(or_table) <- NULL
+print(or_table)
+```
+
+```{r final-model-interpretations}
+cat("=== KEY COEFFICIENT INTERPRETATIONS ===\n\n")
+
+cat("NUMERIC PREDICTORS:\n")
+cat("duration:  OR =", round(exp(coef(model_final)["duration"]), 4),
+    "— each extra second increases odds by",
+    round((exp(coef(model_final)["duration"]) - 1) * 100, 2), "%\n")
+cat("           Per extra minute: OR =",
+    round(exp(60 * coef(model_final)["duration"]), 3),
+    "— odds increase by",
+    round((exp(60 * coef(model_final)["duration"]) - 1) * 100, 1), "%\n\n")
+cat("age:       OR =", round(exp(coef(model_final)["age"]), 4),
+    "— each extra year increases odds by",
+    round((exp(coef(model_final)["age"]) - 1) * 100, 2), "%\n\n")
+cat("balance:   Per €1000 increase: OR =",
+    round(exp(1000 * coef(model_final)["balance"]), 3),
+    "— increases odds by 3.2%\n\n")
+cat("campaign:  OR =", round(exp(coef(model_final)["campaign"]), 4),
+    "— each extra contact during campaign DECREASES odds by",
+    round((1 - exp(coef(model_final)["campaign"])) * 100, 1), "%\n\n")
+
+cat("JOB (reference = admin):\n")
+cat("jobstudent:     OR =", round(exp(coef(model_final)["jobstudent"]), 3),
+    "— students have highest odds relative to admin\n")
+cat("jobretired:     OR =", round(exp(coef(model_final)["jobretired"]), 3),
+    "— retired clients have elevated odds relative to admin\n")
+cat("jobblue-collar: OR =", round(exp(coef(model_final)["jobblue-collar"]), 3),
+    "— blue-collar workers have lower odds than admin\n\n")
+
+cat("CONTACT (reference = cellular):\n")
+cat("contactunknown: OR =", round(exp(coef(model_final)["contactunknown"]), 3),
+    "— unknown contact type has much lower odds than cellular\n\n")
+
+cat("PREVIOUS OUTCOME (reference = failure):\n")
+cat("poutcomesuccess: OR =", round(exp(coef(model_final)["poutcomesuccess"]), 3),
+    "— previous success dramatically increases odds of subscription\n")
+```
+
+> **Key findings from the final model:**
+>
+> - **`poutcome = success`** is the single strongest predictor (OR ≈ 13.562). A client whose previous campaign outcome was a success is nearly 13× more likely to subscribe again.
+> - **`job = student`** (OR ≈ 2.27) and **`job = retired`** (OR ≈ 1.72) are the job categories most positively associated with subscription relative to the admin reference.
+> - **`contact = unknown`** (OR ≈ 0.25) dramatically reduces the probability of subscription compared with cellular contact.
+> - **`duration`**: each additional minute of call duration increases odds by approximately 26.6% (after adjusting for all other predictors).
+> - **`campaign`**: more contacts during the current campaign slightly reduces odds (OR ≈ 0.91 per additional contact).
+
+---
+
+# Class Imbalance — Weighting & Threshold Tuning
+
+## Class Distribution
+
+```{r class-distribution}
+cat("=== Class Distribution in Training Data ===\n")
+table(train_data$y)
+round(prop.table(table(train_data$y)) * 100, 2)
+```
+
+## Inverse Frequency Weighting
+
+```{r class-weights}
+n_no  <- sum(train_data$y == "no")
+n_yes <- sum(train_data$y == "yes")
+total <- nrow(train_data)
+
+cat("Weight for no: ",  round(total / (2 * n_no),  4), "\n")
+cat("Weight for yes:", round(total / (2 * n_yes), 4), "\n")
+
+train_weights <- ifelse(train_data$y == "yes",
+                        total / (2 * n_yes),
+                        total / (2 * n_no))
+
+model_weighted <- glm(formula(model_final),
+                      data    = train_data,
+                      family  = binomial,
+                      weights = train_weights)
+
+summary(model_weighted)
+```
+
+## Threshold Tuning
+
+```{r threshold-tuning}
+pred_valid <- predict(
+  model_final,
+  newdata = valid_data,
+  type = "response"
+)
+
+thresholds <- c(0.5, 0.4, 0.3, 0.2)
+
+cat("=== Threshold Tuning — Validation Data ===\n")
+cat(sprintf("%-12s %-12s %-12s %-12s\n",
+            "Threshold", "Sensitivity", "Specificity", "Accuracy"))
+
+for (t in thresholds) {
+
+  pred_t <- factor(
+    ifelse(pred_valid >= t, "yes", "no"),
+    levels = c("no", "yes")
+  )
+
+  cm_t <- table(
+    Predicted = pred_t,
+    Actual    = valid_data$y
+  )
+
+  sensitivity <- cm_t["yes", "yes"] / sum(cm_t[, "yes"])
+  specificity <- cm_t["no",  "no"]  / sum(cm_t[, "no"])
+  accuracy    <- sum(diag(cm_t)) / sum(cm_t)
+
+  cat(sprintf(
+    "%-12.1f %-12.3f %-12.3f %-12.3f\n",
+    t, sensitivity, specificity, accuracy
+  ))
+}
+```
+```{r pridictor-test-set}
+pred_test <- predict(
+  model_final,
+  newdata = test_data,
+  type = "response"
+)
+
+pred_weighted_test <- predict(
+  model_weighted,
+  newdata = test_data,
+  type = "response"
+)
+
+pred_weighted_valid <- predict(
+  model_weighted,
+  newdata = valid_data,
+  type = "response"
+)
+
+```
+
+```{r threshold-distribution-plot}
+pred_df <- data.frame(probability = pred_test, actual = test_data$y)
+
+ggplot(pred_df, aes(x = probability, fill = actual)) +
+  geom_histogram(bins = 50, alpha = 0.6, position = "identity") +
+  scale_fill_manual(values = c("steelblue", "tomato")) +
+  geom_vline(xintercept = 0.5, linetype = "dashed", color = "black", linewidth = 0.8) +
+  geom_vline(xintercept = 0.2, linetype = "dashed", color = "red",   linewidth = 0.8) +
+  annotate("text", x = 0.52, y = 500, label = "0.5", size = 3.5) +
+  annotate("text", x = 0.22, y = 500, label = "0.2", size = 3.5, color = "red") +
+  labs(title = "Predicted Probabilities by Actual Outcome",
+       subtitle = "Black dashed = 0.5 threshold | Red dashed = 0.2 threshold",
+       x = "Predicted Probability of Subscribing", y = "Count", fill = "Actual") +
+  theme_minimal()
+```
+
+> Lowering the threshold from 0.5 to 0.2 increases sensitivity (ability to detect true
+> subscribers) at the cost of reduced specificity. A threshold of 0.2 was selected as
+> the best balance for the unweighted model.
+
+---
+
+# Threshold Comparison — Detailed Analysis
+
+## Why Threshold Choice Matters
+
+In logistic regression, the model outputs a **probability** (0 to 1) rather than a
+direct class label. A **threshold** (also called a cut-off) is needed to convert that
+probability into a predicted class: values at or above the threshold are predicted as
+"yes", values below as "no".
+
+The default threshold of 0.5 assumes equal cost for false positives and false negatives.
+In an imbalanced dataset like this one (only ~11.7% are "yes"), this default tends to
+under-predict the minority class because the model is rarely confident enough to exceed
+0.5 for "yes" cases.
+
+Lowering the threshold increases **Sensitivity** (the model catches more real "yes"
+cases) but reduces **Specificity** (more "no" clients are incorrectly predicted as "yes").
+The optimal threshold depends on the business goal:
+
+- If the **cost of missing a subscriber** is high → prioritise Sensitivity → lower threshold
+- If the **cost of contacting a non-subscriber** is high → prioritise Specificity → raise threshold
+
+## Full Threshold Grid
+
+```{r threshold-grid}
+thresholds_full <- seq(0.1, 0.9, by = 0.05)
+
+threshold_results <- data.frame(
+  Threshold   = numeric(),
+  Sensitivity = numeric(),
+  Specificity = numeric(),
+  Accuracy    = numeric(),
+  Kappa       = numeric(),
+  F1          = numeric()
+)
+
+for (t in thresholds_full) {
+  pred_t  <- factor(ifelse(pred_valid >= t, "yes", "no"), levels = c("no", "yes"))
+  cm_t    <- confusionMatrix(pred_t, valid_data$y, positive = "yes")
+  tp      <- cm_t$table["yes", "yes"]
+  fp      <- cm_t$table["yes", "no"]
+  fn      <- cm_t$table["no",  "yes"]
+  prec    <- ifelse((tp + fp) == 0, 0, tp / (tp + fp))
+  rec     <- cm_t$byClass["Sensitivity"]
+  f1      <- ifelse((prec + rec) == 0, 0, 2 * prec * rec / (prec + rec))
+
+  threshold_results <- rbind(threshold_results, data.frame(
+    Threshold   = t,
+    Sensitivity = round(cm_t$byClass["Sensitivity"], 3),
+    Specificity = round(cm_t$byClass["Specificity"], 3),
+    Accuracy    = round(cm_t$overall["Accuracy"],    3),
+    Kappa       = round(cm_t$overall["Kappa"],       3),
+    F1          = round(f1, 3)
+  ))
+}
+
+rownames(threshold_results) <- NULL
+print(threshold_results)
+```
+
+```{r threshold-tradeoff-plot}
+thresh_long <- threshold_results %>%
+  pivot_longer(cols = c(Sensitivity, Specificity, Accuracy, F1, Kappa),
+               names_to = "Metric", values_to = "Value")
+
+ggplot(thresh_long, aes(x = Threshold, y = Value, colour = Metric)) +
+  geom_line(linewidth = 1) +
+  geom_vline(xintercept = 0.2, linetype = "dashed", colour = "black") +
+  geom_vline(xintercept = 0.5, linetype = "dotted", colour = "grey40") +
+  annotate("text", x = 0.21, y = 0.15, label = "Chosen\n(0.2)",
+           size = 3, hjust = 0) +
+  annotate("text", x = 0.51, y = 0.15, label = "Default\n(0.5)",
+           size = 3, hjust = 0, colour = "grey40") +
+  scale_colour_brewer(palette = "Set1") +
+  labs(title    = "Sensitivity / Specificity / Accuracy / F1 / Kappa by Threshold",
+subtitle = "Unweighted model on validation data",
+x = "Classification Threshold", y = "Metric Value") +
+  theme_minimal()
+```
+
+```{r threshold-sensitivity-specificity}
+ggplot(threshold_results, aes(x = Threshold)) +
+  geom_line(aes(y = Sensitivity, colour = "Sensitivity"), linewidth = 1.2) +
+  geom_line(aes(y = Specificity, colour = "Specificity"), linewidth = 1.2) +
+  geom_line(aes(y = F1,          colour = "F1 Score"),    linewidth = 1.2) +
+  geom_vline(xintercept = 0.2, linetype = "dashed") +
+  scale_colour_manual(values = c("Sensitivity" = "tomato",
+                                 "Specificity" = "steelblue",
+                                 "F1 Score"    = "darkgreen")) +
+  labs(title  = "Sensitivity–Specificity Trade-off by Threshold",
+       x = "Threshold", y = "Value", colour = "Metric") +
+  theme_minimal()
+```
+
+## Why Threshold 0.2 Was Chosen
+
+```{r threshold-summary-table}
+key_thresholds <- threshold_results[threshold_results$Threshold %in% c(0.2, 0.3, 0.4, 0.5, 0.6), ]
+rownames(key_thresholds) <- NULL
+print(key_thresholds)
+```
+
+> | Threshold | Effect |
+> |-----------|--------|
+> | **0.5 (default)** | High accuracy and specificity, but very low sensitivity — misses most actual subscribers |
+> | **0.2 (chosen)** | Best balance: highest Kappa (0.477) and F1 (0.545), catches 61.2% of subscribers, specificity remains acceptable at 91.4% |
+> | **0.1** | Sensitivity rises further but specificity drops sharply — too many non-subscribers incorrectly flagged |
+>
+> A threshold of **0.2** was selected because it maximises both Kappa (0.477) and
+> F1 score (0.545) — the two metrics most robust to class imbalance. Accuracy alone
+> is misleading here: a model that predicts "no" for every client would still achieve
+> 88.3% accuracy due to the class imbalance. Kappa corrects for this by measuring
+> agreement beyond chance. In a marketing context, threshold 0.2 is the most
+> commercially sensible choice: it identifies over 60% of genuine subscribers while
+> keeping the false positive rate low enough to avoid wasting campaign resources.
+
+---
+
+## BSMOTE — Borderline Synthetic Minority Oversampling
+
+Borderline-SMOTE (BSMOTE) is a third approach to class imbalance. Unlike threshold
+tuning (which changes only the decision boundary) or class weighting (which adjusts
+the loss function), BSMOTE **modifies the training data itself** by synthesising new
+"yes" observations near the decision boundary — the area where the two classes are
+hardest to distinguish.
+
+The logic: only the "borderline" minority observations — those surrounded by majority
+class neighbours — are used as seeds for synthesis. New synthetic points are generated
+along the line between a borderline minority observation and one of its nearest
+minority neighbours. This makes the model more sensitive in precisely the region where
+it struggles most.
+
+````{r bsmote-setup}
+# install.packages("smotefamily")   # run once if not installed
+library(smotefamily)
+````
+
+````{r bsmote-prep}
+# BSMOTE requires a numeric matrix — convert factors to dummies first
+train_numeric <- model.matrix(
+  y ~ duration + age + balance + campaign +
+      job + marital + education + contact + poutcome,
+  data = train_data
+)[, -1]   # remove intercept column
+
+train_outcome <- as.numeric(train_data$y == "yes")   # 1 = yes, 0 = no
+
+cat("=== Class Distribution BEFORE BSMOTE ===\n")
+table(train_data$y)
+round(prop.table(table(train_data$y)) * 100, 2)
+````
+
+````{r bsmote-run}
+set.seed(123)
+
+bsmote_result <- BLSMOTE(
+  X       = as.data.frame(train_numeric),
+  target  = train_outcome,
+  K       = 5,    # nearest neighbours within minority class
+  C       = 5,    # nearest neighbours used to identify borderline cases
+  dupSize = 0     # auto-determine duplication size to balance classes
+)
+
+# Extract balanced dataset and reconstruct outcome factor
+train_bsmote       <- bsmote_result$data
+train_bsmote$y     <- as.factor(ifelse(train_bsmote$class == 1, "yes", "no"))
+train_bsmote$y     <- relevel(train_bsmote$y, ref = "no")
+train_bsmote$class <- NULL
+
+cat("=== Class Distribution AFTER BSMOTE ===\n")
+table(train_bsmote$y)
+round(prop.table(table(train_bsmote$y)) * 100, 2)
+````
+
+> BSMOTE increases the number of "yes" observations in the training set by
+> generating synthetic cases near the class boundary. The test set is **never
+> resampled** — evaluation always uses the original imbalanced test data so
+> that results reflect real-world conditions.
+
+> BSMOTE requires conversion of categorical variables to dummy variables before oversampling. Therefore the logistic regression fitted on the BSMOTE dataset uses the dummy-variable representation of the predictors rather than the original factor variables.
+
+````{r bsmote-model}
+# Refit logistic regression on the BSMOTE-balanced training data
+model_bsmote <- glm(
+  y ~ .,
+  data   = train_bsmote,
+  family = binomial
+)
+
+cat("BSMOTE model AIC:", round(AIC(model_bsmote), 2), "\n")
+summary(model_bsmote)
+````
+
+````{r bsmote-predict}
+# Predict on the ORIGINAL (imbalanced) test set
+# Must rebuild the same dummy matrix used during training
+X_test_bsmote <- as.data.frame(
+  model.matrix(
+    y ~ duration + age + balance + campaign +
+        job + marital + education + contact + poutcome,
+    data = test_data
+  )[, -1]
+)
+
+pred_bsmote_prob  <- predict(model_bsmote,
+                              newdata = X_test_bsmote,
+                              type    = "response")
+
+pred_bsmote_class <- factor(
+  ifelse(pred_bsmote_prob >= 0.5, "yes", "no"),
+  levels = c("no", "yes")
+)
+
+cat("=== Confusion Matrix — BSMOTE Model (Threshold 0.5) ===\n")
+cm_bsmote <- confusionMatrix(pred_bsmote_class, test_data$y, positive = "yes")
+print(cm_bsmote)
+````
+
+````{r bsmote-roc}
+roc_bsmote <- roc(test_data$y, pred_bsmote_prob,
+                  levels = c("no", "yes"), quiet = TRUE)
+
+cat("BSMOTE model AUC:", round(auc(roc_bsmote), 4), "\n")
+````
+
+> BSMOTE typically yields higher sensitivity than the default threshold of 0.5
+> on the unweighted model, because the model was trained on a more balanced
+> dataset and learned a less conservative decision boundary. However AUC tends
+> to remain similar across all three methods — AUC measures ranking ability,
+> which is less affected by class rebalancing than threshold-dependent metrics.
+
+
+
+
+# Regularisation for Variable Selection
+
+Regularisation methods shrink or eliminate coefficients to reduce overfitting and
+perform automatic variable selection. All three standard approaches are applied here
+— LASSO (L1), Ridge (L2), and Elastic Net — and compared against the stepwise
+AIC final model.
+
+## Prepare Data for glmnet
+
+
+```{r reg-setup}
+library(glmnet)
+
+# glmnet requires a numeric model matrix (no intercept column — glmnet adds it)
+X_train <- model.matrix(y ~ duration + age + balance + campaign +
+                          job + marital + education + contact + poutcome,
+                        data = train_data)[, -1]
+
+X_test  <- model.matrix(y ~ duration + age + balance + campaign +
+                          job + marital + education + contact + poutcome,
+                        data = test_data)[, -1]
+
+# Binary outcome must be numeric 0/1 for glmnet
+y_train <- as.numeric(train_data$y == "yes")
+y_test  <- as.numeric(test_data$y  == "yes")
+```
+
+> `model.matrix()` converts all factor variables into dummy variables automatically,
+> which is required by `glmnet`. The intercept column is removed because `glmnet`
+> adds its own.
+
+---
+
+## LASSO (L1 Regularisation)
+
+LASSO (Least Absolute Shrinkage and Selection Operator) applies an L1 penalty that
+can shrink some coefficients exactly to zero, effectively removing variables from
+the model. This makes it a direct variable selection tool.
+
+```{r lasso-cv}
+set.seed(123)
+cv_lasso <- cv.glmnet(X_train, y_train,
+                      family  = "binomial",
+                      alpha   = 1,          # alpha=1 => LASSO
+                      nfolds  = 10)
+
+plot(cv_lasso)
+title("LASSO: Cross-Validated Deviance vs log(lambda)", line = 2.5)
+```
+
+```{r lasso-lambda}
+cat("=== LASSO Optimal Lambda ===\n")
+cat("lambda.min (lowest CV error):    ", round(cv_lasso$lambda.min,    6), "\n")
+cat("lambda.1se (most regularised within 1 SE):", round(cv_lasso$lambda.1se, 6), "\n")
+```
+
+```{r lasso-coefficients}
+cat("=== LASSO Coefficients at lambda.min ===\n")
+lasso_coef_min <- coef(cv_lasso, s = "lambda.min")
+print(lasso_coef_min)
+
+cat("\n=== LASSO Coefficients at lambda.1se (more regularised) ===\n")
+lasso_coef_1se <- coef(cv_lasso, s = "lambda.1se")
+print(lasso_coef_1se)
+
+# Variables shrunk to zero at lambda.1se
+zero_vars <- rownames(lasso_coef_1se)[which(lasso_coef_1se[, 1] == 0)]
+cat("\nVariables eliminated by LASSO (lambda.1se):\n")
+print(zero_vars)
+```
+
+```{r lasso-predictions}
+pred_lasso <- predict(cv_lasso, newx = X_test,
+                      s    = "lambda.min",
+                      type = "response")[, 1]
+
+roc_lasso  <- roc(test_data$y, pred_lasso, levels = c("no", "yes"), quiet = TRUE)
+cat("LASSO AUC:", round(auc(roc_lasso), 4), "\n")
+```
+
+> LASSO performs both regularisation and variable selection simultaneously. Coefficients
+> driven to zero at `lambda.1se` represent variables the model can drop without
+> meaningfully increasing prediction error. Variables retained by LASSO are the most
+> robustly associated with the outcome.
+
+---
+
+## Ridge (L2 Regularisation)
+
+Ridge regression applies an L2 penalty that shrinks all coefficients towards zero
+but does **not** eliminate any variable entirely. It is best used when all predictors
+are expected to contribute at least a little, and is particularly useful when
+multicollinearity is present.
+
+```{r ridge-cv}
+set.seed(123)
+cv_ridge <- cv.glmnet(X_train, y_train,
+                      family = "binomial",
+                      alpha  = 0,           # alpha=0 => Ridge
+                      nfolds = 10)
+
+plot(cv_ridge)
+title("Ridge: Cross-Validated Deviance vs log(lambda)", line = 2.5)
+```
+
+```{r ridge-coefficients}
+cat("=== Ridge Coefficients at lambda.min ===\n")
+ridge_coef <- coef(cv_ridge, s = "lambda.min")
+print(ridge_coef)
+```
+
+```{r ridge-predictions}
+pred_ridge <- predict(cv_ridge, newx = X_test,
+                      s    = "lambda.min",
+                      type = "response")[, 1]
+
+roc_ridge  <- roc(test_data$y, pred_ridge, levels = c("no", "yes"), quiet = TRUE)
+cat("Ridge AUC:", round(auc(roc_ridge), 4), "\n")
+```
+
+> Unlike LASSO, Ridge retains all variables but applies proportional shrinkage. It
+> tends to perform well when many small effects are present. Because it cannot zero
+> out coefficients, it is less interpretable as a selection tool but can yield better
+> predictive accuracy.
+
+---
+
+## Elastic Net (L1 + L2 Combined)
+
+Elastic Net combines both penalties, using a mixing parameter `alpha` between 0 and 1.
+Here `alpha = 0.5` is used, giving equal weight to LASSO and Ridge penalties.
+
+```{r enet-cv}
+set.seed(123)
+cv_enet <- cv.glmnet(X_train, y_train,
+                     family  = "binomial",
+                     alpha   = 0.5,         # 50% LASSO, 50% Ridge
+                     nfolds  = 10)
+
+plot(cv_enet)
+title("Elastic Net: Cross-Validated Deviance vs log(lambda)", line = 2.5)
+```
+
+```{r enet-coefficients}
+cat("=== Elastic Net Coefficients at lambda.min ===\n")
+enet_coef <- coef(cv_enet, s = "lambda.min")
+print(enet_coef)
+
+zero_enet <- rownames(enet_coef)[which(enet_coef[, 1] == 0)]
+cat("\nVariables eliminated by Elastic Net (lambda.min):\n")
+print(zero_enet)
+```
+
+```{r enet-predictions}
+pred_enet <- predict(cv_enet, newx = X_test,
+                     s    = "lambda.min",
+                     type = "response")[, 1]
+
+roc_enet  <- roc(test_data$y, pred_enet, levels = c("no", "yes"), quiet = TRUE)
+cat("Elastic Net AUC:", round(auc(roc_enet), 4), "\n")
+```
+
+> Elastic Net is a useful compromise: it can zero out irrelevant variables like LASSO
+> while handling correlated predictors more stably like Ridge. It is generally
+> preferred over pure LASSO when groups of correlated variables are present.
+
+---
+
+## Regularisation Comparison — All Methods
+
+```{r reg-comparison}
+# AUC for the stepwise final model (already computed earlier)
+roc_final_reg <- roc(test_data$y, pred_test,
+                     levels = c("no", "yes"), quiet = TRUE)
+
+reg_comparison <- data.frame(
+  Method        = c("Stepwise AIC (Final Model)",
+                    "LASSO (lambda.min)",
+                    "Ridge (lambda.min)",
+                    "Elastic Net (alpha=0.5)"),
+  AUC           = round(c(auc(roc_final_reg),
+                           auc(roc_lasso),
+                           auc(roc_ridge),
+                           auc(roc_enet)), 4),
+  Variables_Kept = c("9 predictors",
+                      paste(sum(lasso_coef_min[-1] != 0), "dummy columns"),
+                      "All (shrunk)",
+                      paste(sum(enet_coef[-1] != 0),  "dummy columns"))
+)
+
+print(reg_comparison, row.names = FALSE)
+```
+
+```{r reg-roc-comparison}
+# Plot all ROC curves together
+plot(roc_final_reg, col = "steelblue",  lwd = 2,
+     main = "ROC Comparison — Stepwise vs Regularisation Methods")
+lines(roc_lasso,   col = "tomato",      lwd = 2, lty = 2)
+lines(roc_ridge,   col = "darkgreen",   lwd = 2, lty = 3)
+lines(roc_enet,    col = "purple",      lwd = 2, lty = 4)
+abline(a = 0, b = 1, lty = 2, col = "grey60")
+
+legend("bottomright",
+       legend = c(paste("Stepwise AIC   AUC =", round(auc(roc_final_reg), 3)),
+                  paste("LASSO          AUC =", round(auc(roc_lasso),     3)),
+                  paste("Ridge          AUC =", round(auc(roc_ridge),     3)),
+                  paste("Elastic Net    AUC =", round(auc(roc_enet),      3))),
+       col = c("steelblue", "tomato", "darkgreen", "purple"),
+       lwd = 2, lty = 1:4)
+```
+
+> All four methods produce very similar AUC values, which confirms that the stepwise
+> model's variable selection was robust. If LASSO reaches a comparable AUC with fewer
+> non-zero dummy columns, it provides a simpler and equally valid model. The small
+> differences in AUC across methods suggest the predictive signal in this dataset is
+> strong and consistent regardless of the selection approach used.
+
+---
+
+# Model Evaluation
+
+## ROC Curves & AUC
+
+```{r roc-curves}
+pred_simple <- predict(model_duration, newdata = test_data, type = "response")
+
+roc_simple   <- roc(test_data$y, pred_simple,      levels = c("no", "yes"), quiet = TRUE)
+roc_final    <- roc(test_data$y, pred_test,  levels = c("no", "yes"), quiet = TRUE)
+roc_weighted <- roc(test_data$y, pred_weighted_test,    levels = c("no", "yes"), quiet = TRUE)
+
+cat("=== AUC Comparison ===\n")
+cat("Simple model   AUC:", round(auc(roc_simple),   4), "\n")
+cat("Final model    AUC:", round(auc(roc_final),    4), "\n")
+cat("Weighted model AUC:", round(auc(roc_weighted), 4), "\n")
+
+plot(roc_final,   col = "steelblue",  lwd = 2, main = "ROC Curve Comparison")
+lines(roc_simple, col = "tomato",     lwd = 2, lty = 2)
+lines(roc_weighted, col = "darkgreen", lwd = 2, lty = 3)
+abline(a = 0, b = 1, lty = 2, col = "grey60")
+legend("bottomright",
+       legend = c(paste("Final model AUC    =", round(auc(roc_final),    3)),
+                  paste("Simple model AUC   =", round(auc(roc_simple),   3)),
+                  paste("Weighted model AUC =", round(auc(roc_weighted), 3)),
+                  "Random classifier"),
+       col = c("steelblue", "tomato", "darkgreen", "grey60"),
+       lwd = 2, lty = c(1, 2, 3, 2))
+```
+
+> The final unweighted model (AUC ≈ 0.885) substantially outperforms the simple
+> duration-only model (AUC ≈ 0.807), confirming that the additional predictors
+> contribute meaningfully to predictive power.
+
+## Confusion Matrices — Three Scenarios
+
+```{r confusion-matrices}
+pred_class_05 <- factor(ifelse(pred_test >= 0.5, "yes", "no"), levels = c("no", "yes"))
+pred_class_02 <- factor(ifelse(pred_test >= 0.2, "yes", "no"), levels = c("no", "yes"))
+pred_class_wt <- factor(ifelse(pred_weighted_test   >= 0.5, "yes", "no"), levels = c("no", "yes"))
+
+cat("=== Confusion Matrix: Unweighted, Threshold 0.5 ===\n")
+cm1 <- confusionMatrix(pred_class_05, test_data$y, positive = "yes")
+print(cm1)
+
+cat("\n=== Confusion Matrix: Unweighted, Threshold 0.2 ===\n")
+cm2 <- confusionMatrix(pred_class_02, test_data$y, positive = "yes")
+print(cm2)
+
+cat("\n=== Confusion Matrix: Weighted, Threshold 0.5 ===\n")
+cm3 <- confusionMatrix(pred_class_wt, test_data$y, positive = "yes")
+print(cm3)
+```
+
+```{r confusion-matrix-plots}
+plot_cm <- function(cm, title) {
+  cm_df <- as.data.frame(cm$table)
+  ggplot(cm_df, aes(x = Reference, y = Prediction, fill = Freq)) +
+    geom_tile(color = "white") +
+    geom_text(aes(label = Freq), size = 8, fontface = "bold") +
+    scale_fill_gradient(low = "white", high = "steelblue") +
+    labs(title = title, x = "Actual", y = "Predicted") +
+    theme_minimal() +
+    theme(legend.position = "none",
+          axis.text  = element_text(size = 12),
+          axis.title = element_text(size = 13),
+          plot.title = element_text(size = 14, face = "bold"))
+}
+
+plot_cm(cm1, "Confusion Matrix — Unweighted, Threshold 0.5")
+plot_cm(cm2, "Confusion Matrix — Unweighted, Threshold 0.2")
+plot_cm(cm3, "Confusion Matrix — Weighted,   Threshold 0.5")
+```
+
+## Performance Metric Comparison
+
+```{r metrics-comparison}
+metrics_df <- data.frame(
+  Scenario    = c("Unweighted t=0.5", "Unweighted t=0.2", "Weighted   t=0.5"),
+  Accuracy    = c(round(cm1$overall["Accuracy"],    3),
+                  round(cm2$overall["Accuracy"],    3),
+                  round(cm3$overall["Accuracy"],    3)),
+  Sensitivity = c(round(cm1$byClass["Sensitivity"], 3),
+                  round(cm2$byClass["Sensitivity"], 3),
+                  round(cm3$byClass["Sensitivity"], 3)),
+  Specificity = c(round(cm1$byClass["Specificity"], 3),
+                  round(cm2$byClass["Specificity"], 3),
+                  round(cm3$byClass["Specificity"], 3)),
+  Kappa       = c(round(cm1$overall["Kappa"],       3),
+                  round(cm2$overall["Kappa"],       3),
+                  round(cm3$overall["Kappa"],       3))
+)
+
+print(metrics_df, row.names = FALSE)
+```
+
+> The **unweighted model with threshold = 0.2** achieves the best overall balance:
+> Sensitivity = 60.9%, Specificity = 91.6%, Accuracy = 88.1%, Kappa = 0.471. This
+> scenario best handles the class imbalance while maintaining acceptable accuracy.
+
+## Predicted Probability Distribution
+
+```{r prob-distribution}
+pred_df <- data.frame(probability = pred_test, actual = test_data$y)
+
+ggplot(pred_df, aes(x = probability, fill = actual)) +
+  geom_histogram(bins = 50, alpha = 0.6, position = "identity") +
+  scale_fill_manual(values = c("steelblue", "tomato")) +
+  geom_vline(xintercept = 0.2, linetype = "dashed",
+             color = "black", linewidth = 0.8) +
+  annotate("text", x = 0.22, y = 400,
+           label = "Chosen threshold = 0.2", size = 3.5, hjust = 0) +
+  labs(title = "Predicted Probabilities by Actual Outcome",
+       x = "Predicted Probability of Subscribing",
+       y = "Count", fill = "Actual") +
+  theme_minimal()
+```
+
+
+
+---
+
+## Predictions on Training vs Test Data
+
+Comparing model performance on training and test data is essential for detecting
+**overfitting** — a situation where the model learns the training data too well but
+fails to generalise.
+
+### Predicted Probabilities: Training vs Test
+
+```{r train-test-predictions}
+# Predict on training data
+pred_train <- predict(model_final, newdata = train_data, type = "response")
+
+# Apply chosen threshold of 0.2
+class_train_02 <- factor(ifelse(pred_train      >= 0.2, "yes", "no"),
+                          levels = c("no", "yes"))
+class_test_02  <- factor(ifelse(pred_test >= 0.2, "yes", "no"),
+                          levels = c("no", "yes"))
+
+cat("=== Training Data Predictions (Threshold = 0.2) ===\n")
+cm_train <- confusionMatrix(class_train_02,
+                             factor(train_data$y, levels = c("no", "yes")),
+                             positive = "yes")
+print(cm_train)
+
+cat("\n=== Test Data Predictions (Threshold = 0.2) ===\n")
+cm_test <- confusionMatrix(class_test_02, test_data$y, positive = "yes")
+print(cm_test)
+```
+
+
+### Side-by-Side Metric Comparison
+
+```{r train-test-metric-comparison}
+train_test_metrics <- data.frame(
+  Metric      = c("Accuracy", "Sensitivity", "Specificity", "Kappa"),
+  Training    = c(round(cm_train$overall["Accuracy"],    3),
+                  round(cm_train$byClass["Sensitivity"], 3),
+                  round(cm_train$byClass["Specificity"], 3),
+                  round(cm_train$overall["Kappa"],       3)),
+  Test        = c(round(cm_test$overall["Accuracy"],    3),
+                  round(cm_test$byClass["Sensitivity"], 3),
+                  round(cm_test$byClass["Specificity"], 3),
+                  round(cm_test$overall["Kappa"],       3))
+)
+
+print(train_test_metrics, row.names = FALSE)
+```
+
+```{r train-test-bar-plot}
+train_test_long <- train_test_metrics %>%
+  pivot_longer(cols = c(Training, Test),
+               names_to = "Split", values_to = "Value")
+
+ggplot(train_test_long, aes(x = Metric, y = Value, fill = Split)) +
+  geom_col(position = "dodge") +
+  geom_text(aes(label = Value),
+            position = position_dodge(width = 0.9),
+            vjust = -0.4, size = 3.5) +
+  scale_fill_manual(values = c("Training" = "steelblue", "Test" = "tomato")) +
+  labs(title = "Training vs Test Performance (Threshold = 0.2)",
+       x = NULL, y = "Metric Value") +
+  theme_minimal() +
+  ylim(0, 1.05)
+```
+
+### Predicted Probability Distributions: Train vs Test
+
+```{r prob-dist-train-test}
+prob_compare <- data.frame(
+  probability = c(pred_train, pred_test),
+  actual      = c(as.character(train_data$y),
+                  as.character(test_data$y)),
+  split       = c(rep("Training", length(pred_train)),
+                  rep("Test", length(pred_test)))
+)
+
+ggplot(prob_compare, aes(x = probability, fill = actual)) +
+  geom_histogram(bins = 50, alpha = 0.6, position = "identity") +
+  facet_wrap(~ split) +
+  scale_fill_manual(values = c("steelblue", "tomato")) +
+  geom_vline(xintercept = 0.2, linetype = "dashed", colour = "black") +
+  labs(title = "Predicted Probability Distributions — Training vs Test",
+       x = "Predicted Probability of Subscribing",
+       y = "Count", fill = "Actual") +
+  theme_minimal()
+```
+
+### ROC: Training vs Test
+
+```{r roc-train-vs-test}
+roc_train <- roc(train_data$y, pred_train,
+                 levels = c("no", "yes"), quiet = TRUE)
+roc_test  <- roc(test_data$y,  pred_test,
+                 levels = c("no", "yes"), quiet = TRUE)
+
+plot(roc_train, col = "steelblue", lwd = 2,
+     main = "ROC Curve — Training vs Test Data")
+lines(roc_test, col = "tomato", lwd = 2, lty = 2)
+abline(a = 0, b = 1, lty = 2, col = "grey60")
+
+legend("bottomright",
+       legend = c(paste("Training AUC =", round(auc(roc_train), 4)),
+                  paste("Test AUC     =", round(auc(roc_test),  4))),
+       col = c("steelblue", "tomato"), lwd = 2, lty = c(1, 2))
+
+cat("Training AUC:", round(auc(roc_train), 4), "\n")
+cat("Test AUC:    ", round(auc(roc_test),  4), "\n")
+cat("Difference:  ", round(auc(roc_train) - auc(roc_test), 4), "\n")
+```
+
+> If training and test metrics are very close, the model generalises well and is not
+> overfit. A large gap — particularly a much higher training AUC — would signal that
+> the model has memorised the training data rather than learned the underlying pattern.
+> Small differences (< 0.01–0.02 in AUC) are entirely normal and expected.
+
+---
+
+>>>>>
+
+
+
+## Full Imbalance Handling Comparison
+
+```{r imbalance-full-comparison}
+comparison_imbalance <- data.frame(
+  Method = c(
+    "Unweighted  t=0.5  (baseline)",
+    "Unweighted  t=0.2  (threshold tuned)",
+    "Class weighted  t=0.5",
+    "BSMOTE  t=0.5"
+  ),
+  AUC = c(
+    round(auc(roc_final),    4),
+    round(auc(roc_final),    4),
+    round(auc(roc_weighted), 4),
+    round(auc(roc_bsmote),   4)
+  ),
+  Sensitivity = c(
+    round(cm1$byClass["Sensitivity"],       3),
+    round(cm_test$byClass["Sensitivity"],   3),
+    round(cm3$byClass["Sensitivity"],       3),
+    round(cm_bsmote$byClass["Sensitivity"], 3)
+  ),
+  Specificity = c(
+    round(cm1$byClass["Specificity"],       3),
+    round(cm_test$byClass["Specificity"],   3),
+    round(cm3$byClass["Specificity"],       3),
+    round(cm_bsmote$byClass["Specificity"], 3)
+  ),
+  Accuracy = c(
+    round(cm1$overall["Accuracy"],       3),
+    round(cm_test$overall["Accuracy"],   3),
+    round(cm3$overall["Accuracy"],       3),
+    round(cm_bsmote$overall["Accuracy"], 3)
+  ),
+  Kappa = c(
+    round(cm1$overall["Kappa"],       3),
+    round(cm_test$overall["Kappa"],   3),
+    round(cm3$overall["Kappa"],       3),
+    round(cm_bsmote$overall["Kappa"], 3)
+  )
+)
+
+print(comparison_imbalance, row.names = FALSE)
+```
+
+```{r imbalance-roc-comparison}
+plot(roc_final,    col = "steelblue", lwd = 2,
+     main = "ROC Comparison — Imbalance Handling Methods")
+lines(roc_weighted, col = "purple",   lwd = 2, lty = 2)
+lines(roc_bsmote,   col = "tomato",   lwd = 2, lty = 3)
+abline(a = 0, b = 1, lty = 2, col = "grey60")
+
+legend("bottomright",
+       legend = c(
+         paste("Unweighted t=0.2      AUC =", round(auc(roc_final),    3)),
+         paste("Class weighted t=0.5  AUC =", round(auc(roc_weighted), 3)),
+         paste("BSMOTE t=0.5          AUC =", round(auc(roc_bsmote),   3))
+       ),
+       col = c("steelblue", "purple", "tomato"),
+       lwd = 2, lty = 1:3)
+```
+
+
+```{r imbalance-conclusion}
+cat("=== IMBALANCE HANDLING — CONCLUSION ===\n\n")
+
+best_kappa  <- comparison_imbalance$Method[which.max(comparison_imbalance$Kappa)]
+best_sens   <- comparison_imbalance$Method[which.max(comparison_imbalance$Sensitivity)]
+
+cat("Highest Kappa:      ", best_kappa, "\n")
+cat("Highest Sensitivity:", best_sens,  "\n\n")
+
+cat("Summary of approaches:\n")
+cat("- Threshold t=0.2   : changes decision boundary only; training data unchanged\n")
+cat("- Class weighting   : adjusts training loss; penalises minority misclassification\n")
+cat("- BSMOTE            : synthesises new minority observations near the boundary\n\n")
+cat("All three methods improve sensitivity over the default t=0.5 baseline.\n")
+cat("Class weighting achieves the highest sensitivity at t=0.5 (0.773).\n")
+cat("BSMOTE achieves comparable sensitivity (0.748) with slightly better specificity.\n")
+cat("Both approaches substantially outperform the default unweighted threshold.\n")
+```
+
+> The table and ROC plot above give the definitive comparison across all four
+> scenarios. The **unweighted model with threshold = 0.2** remains the recommended
+> approach for this dataset: it achieves the best Kappa without modifying the
+> training data, keeping the logistic regression coefficients and odds ratios
+> directly interpretable.
+
+
+
+>>>>>
+
+---
+
+## Predicted Subscription Probability: Actual vs Predicted
+
+This section compares the **real observed subscription rate** against the **model's
+predicted probabilities**, broken down by key variables. This helps verify that the
+model is correctly calibrated and not systematically over- or under-predicting for
+specific groups.
+
+### Observed vs Predicted — By Job Type
+
+```{r obs-pred-job}
+compare_job <- test_data %>%
+  mutate(pred_prob = pred_test) %>%
+  group_by(job) %>%
+  summarise(
+    Observed_Rate  = round(mean(y == "yes") * 100, 2),
+    Predicted_Rate = round(mean(pred_prob)  * 100, 2),
+    n              = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(Observed_Rate))
+
+print(compare_job)
+```
+
+```{r obs-pred-job-plot}
+compare_job_long <- compare_job %>%
+  pivot_longer(cols = c(Observed_Rate, Predicted_Rate),
+               names_to = "Type", values_to = "Rate")
+
+ggplot(compare_job_long, aes(x = reorder(job, Rate), y = Rate, fill = Type)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  scale_fill_manual(values = c("Observed_Rate"  = "steelblue",
+                               "Predicted_Rate" = "tomato")) +
+  labs(title = "Observed vs Predicted Subscription Rate by Job Type",
+       x = "Job", y = "Subscription Rate (%)", fill = NULL) +
+  theme_minimal()
+```
+
+### Observed vs Predicted — By Previous Campaign Outcome
+
+```{r obs-pred-poutcome}
+compare_pout <- test_data %>%
+  mutate(pred_prob = pred_test) %>%
+  group_by(poutcome) %>%
+  summarise(
+    Observed_Rate  = round(mean(y == "yes") * 100, 2),
+    Predicted_Rate = round(mean(pred_prob)  * 100, 2),
+    n              = n(),
+    .groups = "drop"
+  )
+
+print(compare_pout)
+
+compare_pout %>%
+  pivot_longer(cols = c(Observed_Rate, Predicted_Rate),
+               names_to = "Type", values_to = "Rate") %>%
+  ggplot(aes(x = poutcome, y = Rate, fill = Type)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = c("Observed_Rate"  = "steelblue",
+                               "Predicted_Rate" = "tomato")) +
+  labs(title = "Observed vs Predicted Subscription Rate by Previous Outcome",
+       x = "Previous Outcome", y = "Subscription Rate (%)", fill = NULL) +
+  theme_minimal()
+```
+
+### Observed vs Predicted — By Education Level
+
+```{r obs-pred-education}
+compare_edu <- test_data %>%
+  mutate(pred_prob = pred_test) %>%
+  group_by(education) %>%
+  summarise(
+    Observed_Rate  = round(mean(y == "yes") * 100, 2),
+    Predicted_Rate = round(mean(pred_prob)  * 100, 2),
+    n              = n(),
+    .groups = "drop"
+  )
+
+print(compare_edu)
+
+compare_edu %>%
+  pivot_longer(cols = c(Observed_Rate, Predicted_Rate),
+               names_to = "Type", values_to = "Rate") %>%
+  ggplot(aes(x = education, y = Rate, fill = Type)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = c("Observed_Rate"  = "steelblue",
+                               "Predicted_Rate" = "tomato")) +
+  labs(title = "Observed vs Predicted Subscription Rate by Education",
+       x = "Education", y = "Subscription Rate (%)", fill = NULL) +
+  theme_minimal()
+```
+
+> Across all three grouping variables, the predicted rates closely track the observed
+> rates. This confirms that the model is well-calibrated — it does not systematically
+> overestimate or underestimate the probability of subscription for any particular
+> subgroup. Small discrepancies are expected and represent normal model error rather
+> than systematic bias.
+
+---
+
+# Model Diagnostics
+
+## Variance Inflation Factors (VIF)
+
+```{r vif}
+cat("=== Variance Inflation Factors (VIF) ===\n")
+vif_vals <- vif(model_final)
+print(round(vif_vals, 3))
+
+vif_df <- as.data.frame(vif_vals)
+cat("\nAny GVIF > 2.24 (equivalent to VIF > 5)?\n")
+print(vif_df[vif_df[, 3] > 2.24, , drop = FALSE])
+```
+
+> All GVIF values are below 2.24, indicating **no multicollinearity** concerns in the final model.
+
+## Cook's Distance — Influential Observations
+
+```{r cooks-distance}
+plot(model_final, which = 4,
+     main = "Cook's Distance — Influential Observations")
+
+cooksd <- cooks.distance(model_final)
+
+cat("=== Top 10 Most Influential Observations ===\n")
+print(round(sort(cooksd, decreasing = TRUE)[1:10], 6))
+
+cat("\nObservations with Cook's D > 0.01:", sum(cooksd > 0.01), "\n")
+cat("Observations with Cook's D > 0.1: ", sum(cooksd > 0.1),  "\n")
+```
+
+> The maximum Cook's Distance is approximately 0.007, well below common thresholds
+> (0.01, 0.1, or 4/n). There are **no influential observations** that would substantially
+> distort the model coefficients.
+
+## Binned Residual Plot
+
+```{r binned-residuals}
+binnedplot(fitted(model_final),
+           resid(model_final, type = "response"),
+           nclass  = 40,
+           main    = "Binned Residual Plot — Final Model",
+           xlab    = "Fitted Probabilities",
+           ylab    = "Average Residuals",
+           col.int = "grey60")
+
+cat("Points within grey bands = good model fit\n")
+cat("Points outside bands = possible misfit or non-linearity\n")
+```
+
+> Most points fall within the grey 95% bands, indicating an overall good fit. A small
+> number of points fall outside the bands at higher predicted probabilities, suggesting
+> mild misfit in that region — acceptable for a model of this scale.
+
+## Hosmer–Lemeshow Goodness-of-Fit Test
+
+```{r hosmer-lemeshow}
+hl_test <- hoslem.test(
+  as.numeric(test_data$y == "yes"),
+  pred_test,
+  g = 10
+)
+
+print(hl_test)
+
+cat("\n--- Interpretation ---\n")
+cat("H0: model fits the data adequately\n")
+cat("p > 0.05 = no evidence of poor fit\n")
+cat("p < 0.05 = evidence of poor fit\n\n")
+cat("Important: The Hosmer-Lemeshow test can be hypersensitive in large samples.\n")
+cat("Even small deviations from perfect calibration may produce a significant p-value.\n")
+cat("Therefore model fit should also be assessed using AUC, calibration plots and overall predictive performance.\n")
+```
+
+> The Hosmer–Lemeshow test returns p < 0.05; however, this is expected with a large
+> sample (n > 45,000), where even trivial deviations are detected. The AUC of 0.882
+> and McFadden R² of 0.295 confirm that the model fits well and is practically useful.
+
+## Overall Model Fit Summary
+
+```{r fit-summary}
+cat("=== Overall Model Fit Summary ===\n\n")
+cat("Null Deviance:    ", round(model_final$null.deviance, 2), "\n")
+cat("Residual Deviance:", round(model_final$deviance, 2), "\n")
+cat("Deviance Reduction:",
+    round(model_final$null.deviance - model_final$deviance, 2), "\n\n")
+
+mcfadden <- 1 - (model_final$deviance / model_final$null.deviance)
+cat("McFadden R²:", round(mcfadden, 4), "\n")
+cat("  0.10–0.20 = acceptable; 0.20–0.40 = good; >0.40 = excellent\n")
+cat("  Our model:", round(mcfadden, 4), "= GOOD fit\n\n")
+
+cat("AIC:", round(AIC(model_final), 2), "\n")
+cat("BIC:", round(BIC(model_final), 2), "\n")
+```
+
+---
+
+# K-Means Clustering & Customer Segmentation
+
+## Why Clustering?
+
+All analysis so far has been **supervised** — we used the subscription label `y` to
+train the model. Clustering is **unsupervised** — it finds natural groupings in the data
+without using the outcome label.
+
+The goal here is **customer and campaign behaviour segmentation**: divide clients
+into meaningful groups based on both their characteristics and their interaction
+with the marketing campaign. The resulting segments are profiled to understand
+different engagement patterns and subscription behaviour.
+
+This is useful because:
+- Different segments may need different marketing messages
+- High-value segments can be prioritised in future campaigns
+- It reveals structure in the data that logistic regression cannot show
+
+## Prepare Data for Clustering
+```{r}
+
+```
+
+```{r cluster-setup}
+library(dplyr)
+library(cluster)
+library(factoextra)
+```
+
+```{r cluster-prep}
+# Select numeric predictors relevant for segmentation
+cluster_vars <- bank[, c("age", "balance", "duration", "campaign", "previous")]
+cluster_vars <- na.omit(cluster_vars)
+
+# Scale to mean=0, sd=1 so no single variable dominates due to magnitude
+cluster_scaled <- scale(cluster_vars)
+
+cat("Variables used for clustering:\n")
+cat("age, balance, duration, campaign, previous\n\n")
+cat("Rows:", nrow(cluster_scaled), "\n")
+cat("All variables scaled to mean=0, sd=1\n")
+```
+
+> Scaling is essential for K-Means. Without it, `balance` (ranging from -8,000 to
+> 100,000) would completely dominate `age` (18 to 95), making the cluster assignments
+> driven almost entirely by balance alone.
+
+## Finding the Optimal Number of Clusters
+
+### Elbow Method
+
+```{r cluster-elbow}
+set.seed(123)
+cluster_sample <- cluster_scaled[sample(nrow(cluster_scaled), 5000), ]
+
+fviz_nbclust(
+  cluster_sample,
+  kmeans,
+  method    = "wss",
+  k.max     = 10,
+  linecolor = "steelblue"
+) +
+  labs(title    = "Elbow Method — Within-Cluster Sum of Squares",
+       subtitle = "Look for the 'elbow' where the curve bends sharply") +
+  theme_minimal()
+```
+
+> The elbow method plots total within-cluster sum of squares (WSS) against the number
+> of clusters. WSS decreases as k increases — but at some point the reduction slows
+> dramatically. The optimal k is at the "elbow" — the point of diminishing returns
+> where adding more clusters gives little improvement.
+
+### Silhouette Method
+
+```{r cluster-silhouette}
+set.seed(123)
+fviz_nbclust(
+  cluster_sample,
+  kmeans,
+  method    = "silhouette",
+  k.max     = 10,
+  linecolor = "steelblue"
+) +
+  labs(title    = "Silhouette Method — Average Silhouette Width",
+       subtitle = "Higher = better defined clusters. Peak = optimal k") +
+  theme_minimal()
+```
+
+> The silhouette width measures how similar each observation is to its own cluster
+> compared to the nearest neighbouring cluster. Values range from -1 to +1. A higher
+> average silhouette width means the clusters are well-separated and internally compact.
+> The k with the highest average silhouette width is optimal.
+
+## Why k = 5? Justification from the Silhouette Plot
+
+The silhouette method clearly showed k = 5 as the statistically optimal number of
+clusters, with the highest average silhouette width (~0.33). While k = 3 is sometimes
+chosen for simplicity, k = 5 is used here because:
+
+- The silhouette plot peaks at k = 5 — this is the data-driven answer
+- The improvement from k = 2 to k = 5 is substantial and consistent
+- After k = 5 the silhouette drops sharply, confirming 5 is the true optimum
+- For a final project, the statistically justified answer is more defensible
+
+## Run K-Means with k = 5
+
+```{r kmeans-fit}
+set.seed(123)
+
+# k = 5 selected based on silhouette method peak
+km <- kmeans(
+  cluster_scaled,
+  centers  = 5,
+  nstart   = 25,    # 25 random starts — keeps best solution
+  iter.max = 100
+)
+
+cat("=== K-Means Results (k = 5) ===\n")
+cat("Number of clusters:  ", nrow(km$centers), "\n")
+cat("Cluster sizes:       ", km$size, "\n")
+cat("Total WSS:           ", round(km$tot.withinss, 2), "\n")
+cat("Between-cluster SS:  ", round(km$betweenss,    2), "\n")
+cat("Variance explained:  ",
+    round(km$betweenss / km$totss * 100, 1), "%\n")
+
+# Add cluster labels back to the full dataset
+bank$cluster <- as.factor(km$cluster)
+```
+
+> `nstart = 25` runs the algorithm 25 times with different random starting points
+> and keeps the solution with the lowest total within-cluster sum of squares.
+> This avoids getting stuck in a poor local optimum, which is especially important
+> with k = 5.
+
+## Sample for Visualisation
+
+```{r cluster-sample}
+set.seed(123)
+sample_idx     <- sample(1:nrow(cluster_scaled), size = 5000)
+cluster_sample <- cluster_scaled[sample_idx, ]
+
+cat("Sample created:", nrow(cluster_sample), "rows\n")
+```
+
+## Visualise the Clusters
+
+```{r cluster-viz}
+# 5-colour palette — one per cluster
+cluster_palette <- c("#2777AA", "#E03030", "#16A34A", "#D97706",
+                     "#6D28D9")
+
+# Use the sample for visualisation (full data too large for distance matrix)
+fviz_cluster(
+  list(data = cluster_sample, cluster = km$cluster[sample_idx]),
+  geom         = "point",
+  ellipse.type = "convex",
+  palette      = cluster_palette,
+  alpha        = 0.4,
+  pointsize    = 0.8,
+  main         = "K-Means Clusters (k=5) — Bank Clients (PCA projection)"
+) +
+  theme_minimal() +
+  labs(subtitle = "Sample of 5,000 clients projected onto first two principal components")
+```
+
+> Because the data has 5 dimensions, `fviz_cluster` projects it onto the first two
+> principal components for visualisation. Clusters that appear to overlap in this
+> 2D view may be well-separated in the full 5-dimensional space.
+
+## Cluster Profiles — Who is in Each Group?
+
+```{r cluster-profiles}
+# Summary statistics by cluster — using base R aggregate to avoid dplyr conflicts
+cluster_profile <- aggregate(
+  cbind(age, balance, duration, campaign) ~ cluster,
+  data = bank,
+  FUN  = mean
+)
+
+cluster_profile$n            <- as.vector(table(bank$cluster))
+cluster_profile$pct_of_total <- round(cluster_profile$n / nrow(bank) * 100, 1)
+cluster_profile$sub_rate_pct <- round(
+  tapply(bank$y == "yes", bank$cluster, mean) * 100, 2)
+cluster_profile$avg_age      <- round(cluster_profile$age,      1)
+cluster_profile$avg_balance  <- round(cluster_profile$balance,  0)
+cluster_profile$avg_duration <- round(cluster_profile$duration, 0)
+cluster_profile$avg_campaign <- round(cluster_profile$campaign, 2)
+cluster_profile$top_job <- sapply(
+  levels(bank$cluster),
+  function(cl) names(sort(table(bank$job[bank$cluster == cl]),
+                           decreasing = TRUE))[1]
+)
+
+cluster_profile <- cluster_profile[, c("cluster", "n", "pct_of_total",
+  "sub_rate_pct", "avg_age", "avg_balance", "avg_duration",
+  "avg_campaign", "top_job")]
+
+print(cluster_profile)
+```
+
+## Subscription Rate by Cluster
+
+```{r cluster-sub-rates}
+cluster_palette <- c("#2777AA", "#E03030", "#16A34A", "#D97706",
+                     "#6D28D9")
+
+ggplot(cluster_profile,
+       aes(x = cluster, y = sub_rate_pct, fill = cluster)) +
+  geom_col(width = 0.65, show.legend = FALSE) +
+  geom_text(aes(label = paste0(sub_rate_pct, "%")),
+            vjust = -0.4, size = 4, fontface = "bold") +
+  scale_fill_manual(values = cluster_palette) +
+  geom_hline(yintercept = mean(bank$y == "yes") * 100,
+             linetype = "dashed", color = "grey40") +
+  annotate("text", x = 5.4, y = mean(bank$y == "yes") * 100 + 0.5,
+           label = "Overall\n11.7%", size = 3, color = "grey40") +
+  labs(title    = "Subscription Rate by Cluster (k = 5)",
+       subtitle = "Dashed line = overall subscription rate (11.7%)",
+       x        = "Cluster",
+       y        = "Subscription Rate (%)") +
+  theme_minimal()
+```
+
+## Distribution of Key Variables by Cluster
+
+```{r cluster-boxplots}
+cluster_palette <- c("#2777AA", "#E03030", "#16A34A", "#D97706",
+                     "#6D28D9")
+
+# Age
+ggplot(bank, aes(x = cluster, y = age, fill = cluster)) +
+  geom_boxplot(outlier.alpha = 0.15, linewidth = 0.4) +
+  scale_fill_manual(values = cluster_palette) +
+  labs(title = "Age Distribution by Cluster",
+       x = "Cluster", y = "Age") +
+  theme_minimal() + theme(legend.position = "none")
+
+# Balance
+ggplot(bank, aes(x = cluster, y = balance, fill = cluster)) +
+  geom_boxplot(outlier.alpha = 0.15, linewidth = 0.4) +
+  scale_fill_manual(values = cluster_palette) +
+  labs(title = "Account Balance by Cluster",
+       x = "Cluster", y = "Balance (EUR)") +
+  theme_minimal() + theme(legend.position = "none") +
+  ylim(-1000, 15000)
+
+# Duration
+ggplot(bank, aes(x = cluster, y = duration, fill = cluster)) +
+  geom_boxplot(outlier.alpha = 0.15, linewidth = 0.4) +
+  scale_fill_manual(values = cluster_palette) +
+  labs(title = "Call Duration by Cluster",
+       x = "Cluster", y = "Duration (seconds)") +
+  theme_minimal() + theme(legend.position = "none")
+```
+
+## Cluster Centre Heatmap
+
+```{r cluster-heatmap}
+library(reshape2)
+
+centers_df         <- as.data.frame(km$centers)
+centers_df$cluster <- paste0("Cluster ", 1:nrow(centers_df))
+
+centers_long <- melt(centers_df,
+                     id.vars       = "cluster",
+                     variable.name = "Variable",
+                     value.name    = "Scaled_Mean")
+
+ggplot(centers_long,
+       aes(x = Variable, y = cluster, fill = Scaled_Mean)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = round(Scaled_Mean, 2)), size = 3.5) +
+  scale_fill_gradient2(
+    low      = "steelblue",
+    mid      = "white",
+    high     = "tomato",
+    midpoint = 0
+  ) +
+  labs(title    = "Cluster Centres Heatmap (k = 5)",
+       subtitle = "Red = above average, Blue = below average  (all values scaled)",
+       x        = "Variable",
+       y        = "Cluster",
+       fill     = "Scaled Mean") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+> The heatmap is the clearest summary of what makes each cluster distinct.
+> Read each row as a profile: a cluster with red `balance` and red `duration`
+> is a high-balance, long-call segment. A cluster with blue on all variables
+> is a low-engagement, low-resource segment.
+
+## Customer and Campaign Behaviour Segments
+
+```{r cluster-interpretation}
+cat("=== CUSTOMER SEGMENTATION SUMMARY (k = 5) ===\n\n")
+
+for (i in 1:5) {
+  cat(paste0("--- Cluster ", i, " ---\n"))
+  cat("Size:              ", km$size[i], "clients  (",
+      cluster_profile$pct_of_total[i], "% of total)\n")
+  cat("Subscription rate: ", cluster_profile$sub_rate_pct[i], "%\n")
+  cat("Avg age:           ", cluster_profile$avg_age[i], "years\n")
+  cat("Avg balance:       EUR", cluster_profile$avg_balance[i], "\n")
+  cat("Avg call duration: ", cluster_profile$avg_duration[i], "seconds\n")
+  cat("Avg campaign:      ", cluster_profile$avg_campaign[i], "contacts\n")
+  cat("Top job:           ", cluster_profile$top_job[i], "\n\n")
+}
+```
+
+> Use the heatmap and profile table above to assign behavioural labels to each
+cluster. The clusters represent different combinations of customer characteristics,
+engagement levels, and campaign interaction patterns.
+> Common segment names for this dataset:
+>
+>Based on the profile table generated above, clusters can be labelled according to their dominant characteristics.
+## Subscription Rate Heatmap by Cluster and Job
+
+```{r cluster-job-heatmap}
+sub_by_cluster_job <- aggregate(
+  (y == "yes") ~ cluster + job,
+  data = bank,
+  FUN  = function(x) round(mean(x) * 100, 1)
+)
+names(sub_by_cluster_job)[3] <- "sub_rate"
+
+ggplot(sub_by_cluster_job,
+       aes(x = cluster, y = job, fill = sub_rate)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = paste0(sub_rate, "%")), size = 2.8) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(title = "Subscription Rate by Cluster and Job Type",
+       x     = "Cluster",
+       y     = "Job Type",
+       fill  = "Sub Rate (%)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size = 9))
+```
+
+> This heatmap reveals which cluster-job combinations are highest priority for
+> targeting. Dark blue cells = high subscription rate for that combination.
+
+
+```{r}
+
+
+# ── Cluster labels (adjust numbers to match your actual cluster profiles) ──
+cluster_labels <- c(
+  "1" = "Young mass-market",
+  "2" = "Over-contacted",
+  "3" = "High-balance",
+  "4" = "Engaged on call",
+  "5" = "Older passive"
+)
+
+cluster_colours <- c(
+  "Young mass-market" = "#E69500",
+  "Older passive"     = "#2ECC71",
+  "Engaged on call"   = "#3498DB",
+  "High-balance"      = "#9B59B6",
+  "Over-contacted"    = "#E74C3C"
+)
+
+# Add cluster name column to bank
+bank$cluster_name <- factor(
+  cluster_labels[as.character(bank$cluster)],
+  levels = cluster_labels
+)
+
+# ── Variables: x-axis vars (columns) and y-axis vars (rows) ──────────────────
+x_vars <- c("age", "balance", "campaign", "duration")
+y_vars <- c("balance", "campaign", "duration", "previous")
+
+# ── Sample for performance (optional) ────────────────────────────────────────
+set.seed(123)
+plot_data <- bank[sample(nrow(bank), 5000), ]
+
+# ── Build each panel ─────────────────────────────────────────────────────────
+make_panel <- function(xvar, yvar, data,
+                       show_x_axis, show_y_axis,
+                       show_x_label, show_y_label) {
+
+  # Blank panel for diagonal and upper triangle
+  x_idx <- which(x_vars == xvar)
+  y_idx <- which(y_vars == yvar)
+
+  # Upper triangle or diagonal: return blank
+  # diagonal: xvar == yvar
+  # upper: x_idx > y_idx (since y_vars is one step ahead of x_vars)
+  is_blank <- (xvar == yvar) || (x_idx > y_idx)
+
+  if (is_blank) {
+    p <- ggplot() +
+      theme_void() +
+      theme(panel.border = element_rect(colour = "black", fill = "white",
+                                        linewidth = 1))
+    return(p)
+  }
+
+  p <- ggplot(data, aes(x = .data[[xvar]], y = .data[[yvar]],
+                         colour = cluster_name)) +
+    geom_point(size = 0.7, alpha = 0.5) +
+    scale_colour_manual(values = cluster_colours, guide = "none") +
+    theme_minimal(base_size = 10) +
+    theme(
+      panel.border     = element_rect(colour = "black", fill = NA,
+                                      linewidth = 1),
+      panel.grid.minor = element_blank(),
+      panel.grid.major = element_line(colour = "grey90"),
+      plot.margin      = margin(2, 2, 2, 2)
+    )
+
+  # X axis
+  if (!show_x_axis) {
+    p <- p + theme(axis.text.x  = element_blank(),
+                   axis.ticks.x = element_blank())
+  }
+  if (!show_x_label) {
+    p <- p + labs(x = NULL)
+  }
+
+  # Y axis
+  if (!show_y_axis) {
+    p <- p + theme(axis.text.y  = element_blank(),
+                   axis.ticks.y = element_blank())
+  }
+  if (!show_y_label) {
+    p <- p + labs(y = NULL)
+  }
+
+  p
+}
+
+# ── Assemble the 4x4 grid ────────────────────────────────────────────────────
+n_x <- length(x_vars)   # 4 columns
+n_y <- length(y_vars)   # 4 rows
+
+plot_list <- list()
+
+for (row_i in seq_along(y_vars)) {
+  for (col_j in seq_along(x_vars)) {
+
+    yvar <- y_vars[row_i]
+    xvar <- x_vars[col_j]
+
+    show_x <- (row_i == n_y)          # only bottom row shows x axis text
+    show_y <- (col_j == 1)            # only left column shows y axis text
+
+    p <- make_panel(
+      xvar        = xvar,
+      yvar        = yvar,
+      data        = plot_data,
+      show_x_axis = show_x,
+      show_y_axis = show_y,
+      show_x_label = FALSE,
+      show_y_label = FALSE
+    )
+
+    plot_list[[length(plot_list) + 1]] <- p
+  }
+}
+
+# ── Column headers (top) ─────────────────────────────────────────────────────
+col_headers <- lapply(x_vars, function(v) {
+  ggplot() +
+    annotate("text", x = 0.5, y = 0.5, label = v,
+             size = 5, fontface = "bold") +
+    theme_void() +
+    theme(
+      panel.border = element_rect(colour = "black", fill = "white",
+                                  linewidth = 1)
+    )
+})
+
+# ── Row labels (right side) ──────────────────────────────────────────────────
+row_labels <- lapply(y_vars, function(v) {
+  ggplot() +
+    annotate("text", x = 0.5, y = 0.5, label = v,
+             size = 5, fontface = "bold", angle = 270) +
+    theme_void() +
+    theme(
+      panel.border = element_rect(colour = "black", fill = "white",
+                                  linewidth = 1)
+    )
+})
+
+# ── Legend ───────────────────────────────────────────────────────────────────
+legend_data <- data.frame(
+  cluster_name = factor(names(cluster_colours), levels = names(cluster_colours)),
+  x = 1, y = 1
+)
+
+legend_plot <- ggplot(legend_data, aes(x, y, colour = cluster_name)) +
+  geom_point(size = 3) +
+  scale_colour_manual(values = cluster_colours, name = NULL) +
+  theme_void() +
+  theme(
+    legend.position  = "bottom",
+    legend.direction = "horizontal",
+    legend.text      = element_text(size = 11)
+  )
+
+legend_grob <- cowplot::get_legend(legend_plot)
+
+# ── Final assembly with patchwork ────────────────────────────────────────────
+
+# Top row: blank corner + 4 column headers + blank corner
+top_row <- (plot_spacer() | wrap_elements(col_headers[[1]]) |
+              wrap_elements(col_headers[[2]]) |
+              wrap_elements(col_headers[[3]]) |
+              wrap_elements(col_headers[[4]]) |
+              plot_spacer()) +
+  plot_layout(widths = c(0.1, 1, 1, 1, 1, 0.15))
+
+# Data rows: 4 scatter panels + right label per row
+make_row <- function(row_i) {
+  panels <- plot_list[((row_i - 1) * n_x + 1):(row_i * n_x)]
+  row_label <- wrap_elements(row_labels[[row_i]])
+  (wrap_elements(panels[[1]]) | wrap_elements(panels[[2]]) |
+     wrap_elements(panels[[3]]) | wrap_elements(panels[[4]]) |
+     row_label) +
+    plot_layout(widths = c(1, 1, 1, 1, 0.15))
+}
+
+final_plot <- top_row /
+  make_row(1) /
+  make_row(2) /
+  make_row(3) /
+  make_row(4) /
+  wrap_elements(legend_grob) +
+  plot_layout(heights = c(0.30, 1, 1, 1, 1, 0.18))
+
+final_plot
+```
+
+## Cluster Silhouette Plot
+
+```{r cluster-silhouette-plot}
+cluster_palette <- c("#2777AA", "#E03030", "#16A34A", "#D97706",
+                     "#6D28D9")
+
+sil <- silhouette(km$cluster[sample_idx], dist(cluster_sample))
+
+fviz_silhouette(sil,
+                palette = cluster_palette,
+                ggtheme = theme_minimal()) +
+  labs(title    = "Silhouette Plot — Cluster Quality (k = 5)",
+       subtitle = "Based on sample of 5,000 clients. Positive = well-assigned.")
+```
+
+> Clusters where most bars are positive and tall are internally cohesive and
+> well-separated from neighbours. Negative bars indicate observations the algorithm
+> assigned to the wrong cluster — a small number is acceptable.
+
+## Business Implications of Segmentation
+
+```{r segment-summary}
+cat("=== BUSINESS IMPLICATIONS (k = 5) ===\n\n")
+
+cat("Cluster with HIGHEST subscription rate:\n")
+best_cluster  <- cluster_profile$cluster[which.max(cluster_profile$sub_rate_pct)]
+cat("  Cluster", as.character(best_cluster),
+    "— Sub rate:", max(cluster_profile$sub_rate_pct), "%\n")
+cat("  PRIORITY TARGET — concentrate campaign effort here.\n\n")
+
+cat("Cluster with LOWEST subscription rate:\n")
+worst_cluster <- cluster_profile$cluster[which.min(cluster_profile$sub_rate_pct)]
+cat("  Cluster", as.character(worst_cluster),
+    "— Sub rate:", min(cluster_profile$sub_rate_pct), "%\n")
+cat("  Lowest return on telemarketing investment.\n\n")
+
+cat("Ranked subscription rates by cluster:\n")
+ranked <- cluster_profile[order(cluster_profile$sub_rate_pct,
+                                decreasing = TRUE),
+                          c("cluster", "sub_rate_pct", "n",
+                            "avg_age", "avg_balance", "avg_duration")]
+print(ranked, row.names = FALSE)
+
+```
+
+> **Key business insight:** The 5 clusters have substantially different subscription
+> rates. The highest-rate cluster represents the ideal target profile — clients who
+> share characteristics with previous subscribers. The lowest-rate cluster represents
+> wasted calls. Directing campaign effort based on cluster membership, rather than
+> calling randomly, has the potential to improve subscription yield significantly.
+
+> K-Means reveals 5 distinct customer and campaign behaviour segments with
+> meaningfully different subscription rates. The results suggest that engagement
+> patterns, particularly call duration and campaign intensity, are associated with
+> different levels of subscription success.
+---
+
+
+*End of Report*
